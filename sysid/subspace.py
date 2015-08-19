@@ -50,7 +50,7 @@ def project_oblique(B, C):
 def subspace_det_algo1(y, u, f, p, s_tol, dt):
     """
     Subspace Identification for deterministic systems
-    algorithm 1 from (1)
+    deterministic algorithm 1 from (1)
 
     assuming a system of the form:
 
@@ -184,6 +184,126 @@ def prbs(n):
     Pseudo random binary sequence.
     """
     return pl.where(pl.rand(n) > 0.5, 0, 1)
+
+def robust_combined_algo(y, u, f, p, s_tol, dt):
+    """
+    Subspace Identification for stochastic systems with input
+    algorithm 1 from chapter 4 of (1)
+
+    assuming a system of the form:
+
+    x(k+1) = A x(k) + B u(k) + 
+    y(k)   = C x(k) + D u(k)
+
+    and given y and u.
+
+    Find A, B, C, D
+
+    See page 52. of (1)
+
+    (1) Subspace Identification for Linear
+    Systems, by Van Overschee and Moor. 1996
+    """
+    #pylint: disable=too-many-arguments, too-many-locals
+    # for this algorithm, we need future and past
+    # to be more than 1
+    assert f > 1
+    assert p > 1
+
+    # setup matrices
+    y = pl.matrix(y)
+    n_y = y.shape[0]
+    u = pl.matrix(u)
+    n_u = u.shape[0]
+    w = pl.vstack([y, u])
+    n_w = w.shape[0]
+
+    # make sure the input is column vectors
+    assert y.shape[0] < y.shape[1]
+    assert u.shape[0] < u.shape[1]
+
+    W = block_hankel(w, f + p)
+    U = block_hankel(u, f + p)
+    Y = block_hankel(y, f + p)
+
+    W_p = W[:n_w*p, :]
+    W_pp = W[:n_w*(p+1), :]
+
+    Y_f = Y[n_y*f:, :]
+    U_f = U[n_y*f:, :]
+
+    Y_fm = Y[n_y*(f+1):, :]
+    U_fm = U[n_u*(f+1):, :]
+
+    # step 1, calculate the oblique projections
+    #------------------------------------------
+    # Y_p = G_i Xd_p + Hd_i U_p
+    # After the oblique projection, U_p component is eliminated,
+    # without changing the Xd_p component:
+    # Proj_perp_(U_p) Y_p = W1 O_i W2 = G_i Xd_p
+    O_i = Y_f*project_oblique(U_f, W_p)
+    O_im = Y_fm*project_oblique(U_fm, W_pp)
+
+    # step 2, calculate the SVD of the weighted oblique projection
+    #------------------------------------------
+    # given: W1 O_i W2 = G_i Xd_p
+    # want to solve for G_i, but know product, and not Xd_p
+    # so can only find Xd_p up to a similarity transformation
+    W1 = pl.matrix(pl.eye(O_i.shape[0]))
+    W2 = pl.matrix(pl.eye(O_i.shape[1]))
+    U0, s0, VT0 = pl.svd(W1*O_i*W2)  #pylint: disable=unused-variable
+
+    # step 3, determine the order by inspecting the singular
+    #------------------------------------------
+    # values in S and partition the SVD accordingly to obtain U1, S1
+    #print s0
+    n_x = pl.find(s0/s0.max() > s_tol)[-1] + 1
+    U1 = U0[:, :n_x]
+    # S1 = pl.matrix(pl.diag(s0[:n_x]))
+    # VT1 = VT0[:n_x, :n_x]
+
+    # step 4, determine Gi and Gim
+    #------------------------------------------
+    G_i = W1.I*U1*pl.matrix(pl.diag(pl.sqrt(s0[:n_x])))
+    G_im = G_i[:-n_y, :] # check
+
+    # step 5, determine Xd_ip and Xd_p
+    #------------------------------------------
+    # only know Xd up to a similarity transformation
+    Xd_i = G_i.I*O_i
+    Xd_ip = G_im.I*O_im
+
+    # step 6, solve the set of linear eqs
+    # for A, B, C, D
+    #------------------------------------------
+    Y_ii = Y[n_y*p:n_y*(p+1), :]
+    U_ii = U[n_u*p:n_u*(p+1), :]
+
+    a_mat = pl.matrix(pl.vstack([Xd_ip, Y_ii]))
+    b_mat = pl.matrix(pl.vstack([Xd_i, U_ii]))
+    ss_mat = a_mat*b_mat.I
+    A_id = ss_mat[:n_x, :n_x]
+    B_id = ss_mat[:n_x, n_x:]
+    assert B_id.shape[0] == n_x
+    assert B_id.shape[1] == n_u
+    C_id = ss_mat[n_x:, :n_x]
+    assert C_id.shape[0] == n_y
+    assert C_id.shape[1] == n_x
+    D_id = ss_mat[n_x:, n_x:]
+    assert D_id.shape[0] == n_y
+    assert D_id.shape[1] == n_u
+
+    if pl.matrix_rank(C_id) == n_x:
+        T = C_id.I # try to make C identity, want it to look like state feedback
+    else:
+        T = pl.matrix(pl.eye(n_x))
+
+    Q_id = pl.zeros((n_x, n_x))
+    R_id = pl.zeros((n_y, n_y))
+    sys = ss.StateSpaceDiscreteLinear(
+        A=T.I*A_id*T, B=T.I*B_id, C=C_id*T, D=D_id,
+        Q=Q_id, R=R_id, dt=dt)
+    return sys
 
 
 # vim: set et fenc=utf-8 ft=python  ff=unix sts=4 sw=4 ts=4 :
