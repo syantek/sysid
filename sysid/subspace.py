@@ -127,7 +127,7 @@ def subspace_det_algo1(y, u, f, p, s_tol, dt):
     # step 4, determine Gi and Gim
     #------------------------------------------
     G_i = W1.I*U1*pl.matrix(pl.diag(pl.sqrt(s0[:n_x])))
-    G_im = G_i[:-n_y, :] # check
+    G_im = G_i[:-n_y, :]
 
     # step 5, determine Xd_ip and Xd_p
     #------------------------------------------
@@ -188,18 +188,20 @@ def prbs(n):
 def robust_combined_algo(y, u, f, p, s_tol, dt):
     """
     Subspace Identification for stochastic systems with input
-    algorithm 1 from chapter 4 of (1)
+    Robust combined algorithm from chapter 4 of (1)
 
     assuming a system of the form:
 
-    x(k+1) = A x(k) + B u(k) + 
-    y(k)   = C x(k) + D u(k)
+    x(k+1) = A x(k) + B u(k) + w(k)
+    y(k)   = C x(k) + D u(k) + v(k)
+    E[(w_p; v_p) (w_q^T v_q^T)] = (Q S; S^T R) delta_pq
 
     and given y and u.
 
-    Find A, B, C, D
+    Find the order of the system and A, B, C, D, Q, S, R
 
-    See page 52. of (1)
+    See page 131, and generally chapter 4, of (1)
+    A different implementation of the algorithm is presented in 6.1 of (1)
 
     (1) Subspace Identification for Linear
     Systems, by Van Overschee and Moor. 1996
@@ -235,23 +237,24 @@ def robust_combined_algo(y, u, f, p, s_tol, dt):
     Y_fm = Y[n_y*(f+1):, :]
     U_fm = U[n_u*(f+1):, :]
 
-    # step 1, calculate the oblique projections
+    # step 1, calculate the oblique and orthogonal projections
     #------------------------------------------
+    #TODO fix explanation
     # Y_p = G_i Xd_p + Hd_i U_p
     # After the oblique projection, U_p component is eliminated,
     # without changing the Xd_p component:
     # Proj_perp_(U_p) Y_p = W1 O_i W2 = G_i Xd_p
-    O_i = Y_f*project_oblique(U_f, W_p)
-    O_im = Y_fm*project_oblique(U_fm, W_pp)
+    O_i  = Y_f*project_oblique(U_f, W_p)
+    Z_i  = Y_f*project(pl.vstack(W_p, U_f))
+    Z_ip = Y_fm*project(pl.vstack(W_pp, U_fm))
 
+    #TODO fix explanation
     # step 2, calculate the SVD of the weighted oblique projection
     #------------------------------------------
     # given: W1 O_i W2 = G_i Xd_p
     # want to solve for G_i, but know product, and not Xd_p
     # so can only find Xd_p up to a similarity transformation
-    W1 = pl.matrix(pl.eye(O_i.shape[0]))
-    W2 = pl.matrix(pl.eye(O_i.shape[1]))
-    U0, s0, VT0 = pl.svd(W1*O_i*W2)  #pylint: disable=unused-variable
+    U0, s0, VT0 = pl.svd(O_i*project_perp(U_f))  #pylint: disable=unused-variable
 
     # step 3, determine the order by inspecting the singular
     #------------------------------------------
@@ -259,51 +262,26 @@ def robust_combined_algo(y, u, f, p, s_tol, dt):
     #print s0
     n_x = pl.find(s0/s0.max() > s_tol)[-1] + 1
     U1 = U0[:, :n_x]
-    # S1 = pl.matrix(pl.diag(s0[:n_x]))
+    S1 = pl.matrix(pl.diag(s0[:n_x]))
     # VT1 = VT0[:n_x, :n_x]
 
     # step 4, determine Gi and Gim
     #------------------------------------------
-    G_i = W1.I*U1*pl.matrix(pl.diag(pl.sqrt(s0[:n_x])))
-    G_im = G_i[:-n_y, :] # check
+    G_i = U1*pl.matrix(pl.diag(pl.sqrt(s1[:n_x])))
+    G_im = G_i[:-n_y, :]
 
-    # step 5, determine Xd_ip and Xd_p
+    # step 5, solve the linear equations for A and C
     #------------------------------------------
-    # only know Xd up to a similarity transformation
-    Xd_i = G_i.I*O_i
-    Xd_ip = G_im.I*O_im
+    # Recompute G_i and G_im from A and C
+    #TODO figure out what K (contains B and D) and the rhos (residuals) are in terms of knowns
+    AC_stack = (pl.vstack(G_im.I*Z_ip,Y_f(1,:))-K*U_f-pl.vstack(rho_w, rho_v))*(G_i.I*Z_i).I #TODO not done
 
-    # step 6, solve the set of linear eqs
-    # for A, B, C, D
+    # step 6, Solve for B and D
     #------------------------------------------
-    Y_ii = Y[n_y*p:n_y*(p+1), :]
-    U_ii = U[n_u*p:n_u*(p+1), :]
+    #TODO do minimization problem
 
-    a_mat = pl.matrix(pl.vstack([Xd_ip, Y_ii]))
-    b_mat = pl.matrix(pl.vstack([Xd_i, U_ii]))
-    ss_mat = a_mat*b_mat.I
-    A_id = ss_mat[:n_x, :n_x]
-    B_id = ss_mat[:n_x, n_x:]
-    assert B_id.shape[0] == n_x
-    assert B_id.shape[1] == n_u
-    C_id = ss_mat[n_x:, :n_x]
-    assert C_id.shape[0] == n_y
-    assert C_id.shape[1] == n_x
-    D_id = ss_mat[n_x:, n_x:]
-    assert D_id.shape[0] == n_y
-    assert D_id.shape[1] == n_u
-
-    if pl.matrix_rank(C_id) == n_x:
-        T = C_id.I # try to make C identity, want it to look like state feedback
-    else:
-        T = pl.matrix(pl.eye(n_x))
-
-    Q_id = pl.zeros((n_x, n_x))
-    R_id = pl.zeros((n_y, n_y))
-    sys = ss.StateSpaceDiscreteLinear(
-        A=T.I*A_id*T, B=T.I*B_id, C=C_id*T, D=D_id,
-        Q=Q_id, R=R_id, dt=dt)
-    return sys
-
+    # step 7, determine the covariance matrices Q, S, and R
+    #-------------------------------------------
+    #TODO once rhos are solved for, find their covariance
 
 # vim: set et fenc=utf-8 ft=python  ff=unix sts=4 sw=4 ts=4 :
